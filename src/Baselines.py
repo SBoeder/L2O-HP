@@ -42,91 +42,6 @@ def BO_objective(candidate):
     trajectory = torch.cat((trajectory,candidate_idx))
         
     return y[candidate_idx].numpy().reshape(-1)
-
-# Grid Search
-def Grid(searchspace,testdatasets,hdlr=None,T=100):
-    
-    # Get hdlr if not handed over
-    if hdlr==None:
-        hdlr,ids = get_hdlr(searchspace)
-    
-    # rollout for each testdataset
-    alltrajectories = {}
-    for testdataset in testdatasets:
-        # load data & create environment
-        X,y = data_loader(searchspace,testdataset,hdlr,device=torch.device("cpu"))
-        env = Environment(X,y)
-        
-        # get testseeds
-        tseeds  = get_seeds(searchspace,testdataset)
-        
-        domain = torch.zeros([2,X.shape[1]])
-        
-        # get min/max of every feature
-        domain[0] = X.min(axis=0).values
-        domain[1] = X.max(axis=0).values
-        
-        # get linear aligned params
-        n_per_col = np.ceil(np.power(100,1/X.shape[1])).astype(int)
-        gridded_per_col = np.linspace(domain[0],domain[1],num=n_per_col).T
-        
-        # rollout for every seed
-        trajectories = torch.tensor([])
-        for tseed in tseeds:
-            # initialize with starting points
-            trajectory = torch.tensor([]).long()
-            _,_,losses,idxs = env.initGP(tseed)
-            trajectory = torch.cat((trajectory,torch.tensor(idxs)))
-            
-            # get 100 random combinations, put them to grid and evaluate
-            already_chosen = []
-            for t in range(T):
-                while(True):
-                    idx = np.random.choice(gridded_per_col.shape[1],gridded_per_col.shape[0])
-                    if idx.tolist() not in already_chosen:
-                        already_chosen.append(idx.tolist())
-                        break
-                candidate = torch.tensor(np.take(gridded_per_col,idx))
-                candidate_dist = torch.cdist(candidate.unsqueeze(0), X.float())
-                candidate_dist = candidate_dist.scatter(1,trajectory.unsqueeze(0),np.inf)
-                candidate_idx = torch.argmin(candidate_dist,axis=1)
-                trajectory = torch.cat((trajectory,candidate_idx))
-        
-            trajectories = torch.cat((trajectories,trajectory.unsqueeze(0)))
-        traj_accs,time_to_best,regret_curve,average_normalized_regret,average_regret = create_stats(X, y, trajectories.long())
-        alltrajectories[testdataset] = {'testseeds':tseeds,'trajectories':trajectories,"accs":traj_accs,"time_to_best":time_to_best,"regret_curve":regret_curve,"average_normalized_regret":average_normalized_regret,"average_regret":average_regret} 
-    return alltrajectories
-    
-    
-# Random Search
-def Random(searchspace,testdatasets,hdlr=None,T=100):
-    # Get hdlr if not handed over
-    if hdlr==None:
-        hdlr,ids = get_hdlr(searchspace)
-    # rollout for each testdataset
-    alltrajectories = {}
-    for testdataset in testdatasets:
-        # load data & create environment
-        X,y = data_loader(searchspace,testdataset,hdlr,device=torch.device("cpu"))
-        env = Environment(X,y)
-        
-        # get testseeds
-        tseeds  = get_seeds(searchspace,testdataset)
-                
-        # rollout for every seed
-        trajectories = torch.tensor([])
-        for tseed in tseeds:
-            trajectory = torch.tensor([]).long()
-            _,_,losses,idxs = env.initGP(tseed)
-           
-            idxrange = np.delete(np.arange(X.shape[0]),trajectory)
-            np.random.shuffle(idxrange)
-            new_idxs = idxrange[:T]
-            trajectory = torch.cat((trajectory,torch.tensor(idxs),torch.tensor(new_idxs)))
-            trajectories = torch.cat((trajectories,trajectory.unsqueeze(0)))
-        traj_accs,time_to_best,regret_curve,average_normalized_regret,average_regret = create_stats(X, y, trajectories.long())
-        alltrajectories[testdataset] = {'testseeds':tseeds,'trajectories':trajectories,"accs":traj_accs,"time_to_best":time_to_best,"regret_curve":regret_curve,"average_normalized_regret":average_normalized_regret,"average_regret":average_regret} 
-    return alltrajectories
              
 # Bayesian Opt (UCB, EI, POI, MES)
 def BO_UCB(searchspace,testdatasets,hdlr=None,T=100):
@@ -560,6 +475,9 @@ def HEBO(searchspace,testdatasets,hdlr=None,T=100):
                  
     return alltrajectories
 
+def L2OHPDAgger(searchspace,testdatasets,hdlr=None,T=100):
+    return L2OHP(searchspace,testdatasets,hdlr=None,T=100,dagger=True)
+
 def L2OHP(searchspace,testdatasets,hdlr=None,T=100,dagger=False):
     from Models import Learner
     from Agent import Agent
@@ -630,33 +548,37 @@ if __name__ == "__main__":
     from Utility import get_testdatasets
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('-s',"--searchspace",nargs="*")
+    parser.add_argument('-s',"--searchspace",nargs=1)
     parser.add_argument("-a","--algorithms",nargs="*",default=["Grid"],type=str)
+    parser.add_argument("-t","--testdatasets",nargs="*",default=None,type=str)
     args = parser.parse_args()
     print("arguments read...",flush=True)
     
-    for searchspace in args.searchspace:
-        print("Searchspace: "+searchspace,flush=True)
-        hdlr,ids = get_hdlr(searchspace)
-            
-        # get the testdatasets used in the rollouts
-        testdatasets = get_testdatasets(searchspace)
+    
+    print("Searchspace: "+args.searchspace,flush=True)
+    hdlr,ids = get_hdlr(args.searchspace)
         
-        # run the baseline for each testdataset
-        for algorithm in args.algorithms:
-            print("Algorithm: {}".format(algorithm),flush=True)
-            
-            # run selected algorithm and create stats, do by class if SMAC
-            if algorithm == "SMAC":
-                allstats = SMAC(searchspace,testdatasets,hdlr=hdlr).run_SMAC()
-            else:
-                allstats = globals()[algorithm](searchspace,testdatasets,hdlr=hdlr)
-            
-            # save stats
-            rootpath = "../teststatistics/baselines/{}".format(algorithm)
-            if not os.path.isdir(rootpath):
-                os.mkdir(rootpath)
-            filepath = rootpath + "/tests_{}.pkl".format(searchspace)
-            with open(filepath, "wb") as f:
-                pkl.dump(allstats, f)
+    # get the testdatasets used in the rollouts
+    if args.testdatasets == None:
+        testdatasets = get_testdatasets(args.searchspace)
+    else:
+        testdatasets = args.testdatasets
+    
+    # run the baseline for each testdataset
+    for algorithm in args.algorithms:
+        print("Algorithm: {}".format(algorithm),flush=True)
+        
+        # run selected algorithm and create stats, do by class if SMAC
+        if algorithm == "SMAC":
+            allstats = SMAC(args.searchspace,testdatasets,hdlr=hdlr).run_SMAC()
+        else:
+            allstats = globals()[algorithm](args.searchspace,testdatasets,hdlr=hdlr)
+        
+        # save stats
+        rootpath = "../teststatistics/baselines/{}".format(algorithm)
+        if not os.path.isdir(rootpath):
+            os.mkdir(rootpath)
+        filepath = rootpath + "/tests_{}.pkl".format(args.searchspace)
+        with open(filepath, "wb") as f:
+            pkl.dump(allstats, f)
     
